@@ -1,0 +1,87 @@
+# Prerequisites
+*.d
+
+# Compiled Object files
+*.slo
+*.lo
+*.o
+*.obj
+
+# Precompiled Headers
+*.gch
+*.pch
+
+# Compiled Dynamic libraries
+*.so
+*.dylib
+*.dll
+
+# Fortran module files
+*.mod
+*.smod
+
+# Compiled Static libraries
+*.lai
+*.la
+*.a
+*.lib
+
+# Executables
+*.exe
+*.out
+*.app
+
+# Project exclude paths
+/cmake-build-debug/
+/build/
+/output/
+/x64
+/Debug
+.vs
+html
+latex
+# *.off
+# *.OFF
+/static
+# *.json
+
+*.unfold
+*.folded
+*.svg
+*.png
+# *.off
+*.ply
+*.gz
+*.parquet
+*.segppmc
+*.log
+*.csv
+.cache
+__pycache__/
+*.pyc
+*.bin
+
+profiling
+profiling_all
+build*
+.venv
+
+# 例外：docs/refactor/baseline/ 是**门禁的冻结基准**（回归 bpv/质量三套门禁
+# 都比对它）。上面的 *.csv 曾把其中三个静默吞掉（bench_columnar_baseline.csv、
+# bpv_budget_baseline.csv、quality_baseline.csv），导致这些门禁**只在本机可跑**，
+# 新克隆上直接失效。基准不是构建产物，必须随仓库走。
+!docs/refactor/baseline/*.csv
+!docs/refactor/baseline/*.txt
+
+# 原版 PPMC 的调试输出：impl/OpenMesh/PPMC/mymesh.cpp:139 用 ofstream 在**当前工作目录**
+# 打开 debug.txt（trunc）。该子树按硬约束不改，且一跑 bench_openmesh_originals.sh 就会
+# 重新生成 —— 所以「删掉」不成立，只有忽略才成立（2026-09-19 实测：删后又被生成）。
+debug.txt
+
+# 例外：阶段一/阶段二证据（2026-10-22）。这些 CSV/日志是门禁输入与论文表
+# 的证据链，不是构建产物；上面的 *.csv / *.log 会把它们静默吞掉。
+!docs/memory/PHASE1_TARGET_MATRIX.csv
+!docs/memory/PHASE1_MEASUREMENTS.csv
+!docs/memory/PHASE1_MEASUREMENTS/**
+!docs/memory/QUALITY_CURVE_DIGITIZED_VQMMC.csv
+!docs/memory/QUALITY_CURVE_TREND_VQMMC.csv

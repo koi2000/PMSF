@@ -1,0 +1,13 @@
+{
+  "model": "QEM paper Fig.7/Fig.14 foot",
+  "source_url": "https://www.mgarland.org/dist/models/bones.smf.gz",
+  "source_sha256": "f8809daeba2274df8cb2be1d18b73ed706e75f5cd15ff85aae98aed966503071",
+  "smf_sha256": "155d27b6e2d1c7dfd8c47879b474d0ccb86f1e51c67fdd39b63c9ba1f4750b75",
+  "off_sha256": "ee5375d566866b20e97ee303559487788e72a784bcc5df6b1730af209e3e55e7",
+  "vertices": 2154,
+  "faces": 4204,
+  "downloaded_on": "2026-11-10",
+  "conversion": "SMF v/t records; preserve decimal text and vertex/face order; indices 1-based to 0-based; no coordinate transform",
+  "script": "docs/memory/FULL_REPRO_QEM_2026-11-10/round_001/acquire_foot.py",
+  "version": "author-distributed bones.smf.gz; original 4204-face foot family; figure shape/scale to verify"
+}

@@ -1,0 +1,495 @@
+--- a/impl/common/PaperBlobAlgorithmSpecs.h
++++ b/impl/common/PaperBlobAlgorithmSpecs.h
+@@ -27,6 +27,11 @@
+ // Layout 25 sv12: sv8 entropy layout, with oriented-Z / minimum-angle
+ // mode2 recovery. Never reinterpret legacy sv1..11 with this matcher.
+ inline constexpr std::int32_t kPCATMStrictPaperOrientedZVersion = 12;
++// task-59 B1-alt: identical colour stream (legacy 4-colour rounds), but the
++// displacement stream is recoded with the adaptive bit-plane coder from
++// PCATMStrictAdaptiveResidual.h (paper §4 records displacements entropy-coded;
++// same values, better code). Never reinterpret older scheme versions with it.
++inline constexpr std::int32_t kPCATMStrictPaperAdaptiveResidualVersion = 13;
+ 
+ inline PaperConnectivityBlobSpec vqmmcLegacyCodebookConnectivityBlobSpec(
+     std::int32_t roundCount) {
+@@ -169,6 +174,7 @@
+         case kPaperBlobSchemeVersionCodec010:
+         case kPaperBlobSchemeVersionCodec011:
+         case kPCATMStrictPaperOrientedZVersion:
++        case kPCATMStrictPaperAdaptiveResidualVersion:
+             return true;
+         default:
+             return false;
+@@ -191,6 +197,7 @@
+         case kPaperBlobSchemeVersionCodec010:
+         case kPaperBlobSchemeVersionCodec011:
+         case kPCATMStrictPaperOrientedZVersion:
++        case kPCATMStrictPaperAdaptiveResidualVersion:
+             return true;
+         default:
+             return false;
+@@ -245,6 +252,10 @@
+     return schemeVersion ==
+            kPaperBlobSchemeVersionCodec011;
+ }
++inline bool paperBlobSchemeVersionPCATMStrictPaperUsesAdaptiveResidual(
++    std::int32_t schemeVersion) {
++    return schemeVersion == kPCATMStrictPaperAdaptiveResidualVersion;
++}
+ inline bool paperBlobSchemeVersionPCATMStrictPaperUsesGlobalColor(
+     std::int32_t schemeVersion) {
+     switch (schemeVersion) {
+@@ -253,6 +264,7 @@
+         case kPaperBlobSchemeVersionCodec010:
+         case kPaperBlobSchemeVersionCodec011:
+         case kPCATMStrictPaperOrientedZVersion:
++        case kPCATMStrictPaperAdaptiveResidualVersion:
+             return true;
+         default:
+             return false;
+--- a/impl/common/strict/PCATMStrictPMSFSymbolCollectOperator.cpp
++++ b/impl/common/strict/PCATMStrictPMSFSymbolCollectOperator.cpp
+@@ -3,6 +3,7 @@
+ // PCATMStrictPMSFSymbolCollectOperator.cpp
+ 
+ #include "common/strict/PCATMStrictPMSFSymbolCollectOperator.h"
++#include "common/strict/PCATMStrictAdaptiveResidual.h"
+ #include "PCATM/PCATMPaperMode2.h"
+ #include "PCATM/boundary/PCATMPMSFBoundary.h"
+ #include "common/PaperLayoutAliases.h"
+@@ -3732,6 +3733,9 @@
+         throw std::runtime_error("[PCATMStrictPaper] color/residual round count mismatch.");
+     }
+ 
++    // task-59 B1-alt: paper-faithful entropy recoding of the displacement stream.
++    const bool useAdaptiveResidual =
++        isEnvOn("PMSF_PCATM_STRICT_ADAPT_RESIDUAL");
+     const bool useHuffmanResidual = isEnvOn("PMSF_PCATM_STRICT_HUFFMAN_RESIDUAL");
+     const bool useDenseRangeResidual = !useHuffmanResidual && isEnvOn("PMSF_PCATM_STRICT_DENSE_RANGE_RESIDUAL");
+     const bool useByteRangeResidual = !useHuffmanResidual && !useDenseRangeResidual && isEnvOn("PMSF_PCATM_STRICT_VARINT_BYTE_RANGE_RESIDUAL");
+@@ -3744,7 +3748,7 @@
+     const bool useAxisVarintResidual =
+         !useHuffmanResidual && !useDenseRangeResidual && !useByteRangeResidual && !useSplitAxisVarintResidual && !useVarintResidual;
+     const bool useGlobalHuffman = true;
+-    bool useGlobalColor = useVarintResidual || useSplitAxisVarintResidual || useByteRangeResidual || useMeppAxisRangeResidual;
++    bool useGlobalColor = useAdaptiveResidual || useVarintResidual || useSplitAxisVarintResidual || useByteRangeResidual || useMeppAxisRangeResidual;
+     const char* forceMode2Env = std::getenv("PMSF_PCATM_STRICT_FORCE_MODE2_LEVELS");
+     const int forceMode2Levels =
+         (forceMode2Env && *forceMode2Env) ? std::atoi(forceMode2Env) : 0;
+@@ -3765,6 +3769,7 @@
+         useGlobalColor = true;
+     }
+     const int schemeVersion =
++        useAdaptiveResidual ? pmsf::kPCATMStrictPaperAdaptiveResidualVersion :
+         useVarintResidual ? pmsf::kPCATMStrictPaperOrientedZVersion :
+         useSplitAxisVarintResidual ?
+             kPCATMStrictPaperColorOnlySplitAxisVarintResidualSchemeVersion :
+@@ -3942,7 +3947,20 @@
+     }
+ 
+     if (useGlobalHuffman) {
+-        auto geom = useHuffmanResidual ?
++        std::vector<uint8_t> geom;
++        if (useAdaptiveResidual) {
++            std::vector<std::vector<std::array<int32_t, 3>>> adaptRounds;
++            adaptRounds.reserve(residualRounds.size());
++            for (const auto& q : residualRounds) {
++                std::vector<std::array<int32_t, 3>> vals;
++                vals.reserve(q.size());
++                for (const auto& r : q)
++                    vals.push_back({r.x(), r.y(), r.z()});
++                adaptRounds.push_back(std::move(vals));
++            }
++            geom = pmsf::pcatmstrict::ard::encode(adaptRounds);
++        } else {
++        geom = useHuffmanResidual ?
+                         encodeResidualGlobalHuffman(residualRounds) :
+                         (useDenseRangeResidual ?
+                              encodeResidualGlobalDenseRange(residualRounds) :
+@@ -3953,6 +3971,7 @@
+                                        (useSplitAxisVarintResidual ? encodeResidualGlobalSplitAxisVarintZlib(residualRounds) :
+                                                                      (useAxisVarintResidual ? encodeResidualGlobalAxisVarintZlib(residualRounds) :
+                                                                                               encodeResidualGlobalVarintZlib(residualRounds))))));
++        }
+         sumGeom = static_cast<int>(geom.size());
+         cbb.appendStreamBytes(0, pmsf::kPaperBlobStreamPCATMStrictPaperGeometry, geom);
+     }
+@@ -4115,7 +4134,8 @@
+                   << " valenceSide=" << sumValence << " isPolySide=" << sumIsPoly << " containerOverhead=" << lastContainerOverheadBytes_
+                   << " totalBlob=" << blob.size() << " rawColorBits=" << rawColorBits << " colorCodec=" << colorCodec
+                   << " removed=" << removedVertices << " rounds=" << numRounds << " residualMode="
+-                  << (useHuffmanResidual ?
++                  << (useAdaptiveResidual ? "adaptive_bitplane" :
++                          (useHuffmanResidual ?
+                           "global_huffman" :
+                           (useDenseRangeResidual ?
+                                "global_dense_range" :
+@@ -4124,7 +4144,7 @@
+                                     (useMeppAxisRangeResidual ?
+                                          "global_mepp_axis_range" :
+                                          (useSplitAxisVarintResidual ? "global_split_axis_varint_zlib" :
+-                                                                       (useAxisVarintResidual ? "global_axis_varint_zlib" : "global_varint_zlib"))))))
++                                                                       (useAxisVarintResidual ? "global_axis_varint_zlib" : "global_varint_zlib")))))))
+                   << " deg3=" << degree3 << " deg4=" << degree4 << " deg5=" << degree5 << " deg6=" << degree6 << " degOther=" << degreeOther
+                   << " mode2Rounds=" << mode2Rounds << " mode4Rounds=" << mode4Rounds << " residualAlphabet=" << residualAlphabet.size() << std::endl;
+     }
+--- a/impl/common/strict/PCATMStrictPMSFSymbolReadOperator.cpp
++++ b/impl/common/strict/PCATMStrictPMSFSymbolReadOperator.cpp
+@@ -3,6 +3,7 @@
+ // PCATMStrictPMSFSymbolReadOperator.cpp
+ 
+ #include "common/strict/PCATMStrictPMSFSymbolReadOperator.h"
++#include "common/strict/PCATMStrictAdaptiveResidual.h"
+ #include "common/PaperLayoutAliases.h"
+ #include "PCATM/PCATMPaperMode2.h"
+ 
+@@ -1587,6 +1588,9 @@
+     residualsPerRound_.assign(decodedRounds_, 0);
+     mode2SidePerRound_.assign(static_cast<size_t>(decodedRounds_), {});
+ 
++    const bool globalAdaptiveResidual =
++        pmsf::paperBlobSchemeVersionPCATMStrictPaperUsesAdaptiveResidual(
++            hdr.scheme_version);
+     const bool globalHuffman =
+         pmsf::paperBlobSchemeVersionPCATMStrictPaperUsesGlobalHuffmanResidual(
+             hdr.scheme_version);
+@@ -1609,7 +1613,18 @@
+         pmsf::paperBlobSchemeVersionPCATMStrictPaperUsesMeppAxisRangeResidual(
+             hdr.scheme_version);
+     std::vector<std::vector<MCGAL::PointInt>> globalResiduals;
+-    if (globalHuffman) {
++    if (globalAdaptiveResidual) {
++        const auto adaptStream =
++            rd.getStream(0, pmsf::kPaperBlobStreamPCATMStrictPaperGeometry);
++        auto adaptRounds = pmsf::pcatmstrict::ard::decode(
++            adaptStream.data(), adaptStream.size(), decodedRounds_);
++        globalResiduals.resize(static_cast<std::size_t>(decodedRounds_));
++        for (int r = 0; r < decodedRounds_; ++r) {
++            auto& dst = globalResiduals[static_cast<std::size_t>(r)];
++            for (const auto& v : adaptRounds[static_cast<std::size_t>(r)])
++                dst.emplace_back(v[0], v[1], v[2]);
++        }
++    } else if (globalHuffman) {
+         globalResiduals = decodeResidualGlobalHuffman(
+             rd.getStream(0, pmsf::kPaperBlobStreamPCATMStrictPaperGeometry),
+             decodedRounds_);
+@@ -1750,7 +1765,7 @@
+         }
+ 
+         std::vector<MCGAL::PointInt> residuals =
+-            (globalHuffman || globalVarintResidual ||
++            (globalAdaptiveResidual || globalHuffman || globalVarintResidual ||
+              globalDenseRangeResidual || globalAxisVarintResidual ||
+              globalSplitAxisVarintResidual || globalByteRangeResidual ||
+              globalMeppAxisRangeResidual)
+@@ -1786,7 +1801,9 @@
+                   << " totalColorBits=" << totalColorBits_
+                   << " totalResiduals=" << totalResiduals_
+                   << " blobSize=" << blobSize
+-                  << " residualMode=" << (globalByteRangeResidual
++                  << " residualMode=" << (globalAdaptiveResidual
++                                             ? "adaptive_bitplane"
++                                         : (globalByteRangeResidual
+                                              ? "global_varint_byte_range"
+                                          : (globalMeppAxisRangeResidual
+                                              ? "global_mepp_axis_range"
+@@ -1796,7 +1813,7 @@
+                                          : (globalDenseRangeResidual ? "global_dense_range"
+                                          : (globalVarintResidual ? "global_varint_zlib"
+                                                                 : (globalHuffman ? "global_huffman"
+-                                                                                 : "per_round")))))))
++                                                                                 : "per_round"))))))))
+                   << " topoSideStreams=" << (hasTopoSideStreams ? "yes" : "no")
+                   << " colorOnly=" << (colorOnly ? "yes" : "no")
+                   << std::endl;
+--- /dev/null
++++ b/impl/common/strict/PCATMStrictAdaptiveResidual.h
+@@ -0,0 +1,288 @@
++// SPDX-License-Identifier: Apache-2.0
++//
++// PCATMStrictAdaptiveResidual.h
++//
++// task-59 (B1-alt): paper-faithful entropy recoding of the PCATM strict
++// displacement stream.  The displacement values are unchanged; only their
++// entropy code changes (paper §4 says the displacement vectors are Huffman
++// coded - this is the same data entropy-coded per round/axis with an adaptive
++// binary bit-plane model instead of a single global varint+zlib blob).
++//
++// Bit-plane model (deterministic, identical on encoder and decoder):
++//   for round r, axis a (x=0,y=1,z=2), value v:
++//     z = zigzag(v)                     (uint32)
++//     L = bit_length(z)                 (0 for z==0)
++//     length  : 4-bit binary tree, node contexts per (r,a)
++//     mantissa: bits L-2 .. 0, contexts per (r,a,k)
++// Model index layout:
++//   [0, numRounds*3*15)                 length tree nodes (15 per r,a)
++//   [lenCount, lenCount+numRounds*3*14) mantissa bit positions (14 per r,a)
++// All models are binary qsmodels (scale 10, init count 1<<9) driven by the
++// framework range coder - exactly the same primitive the storage layer uses.
++//
++// Wire format (little-endian varints):
++//   varint numRounds
++//   varint perRoundCount[0..numRounds)
++//   varint payloadBytes
++//   payload bytes (range-coded)
++//
++// This header intentionally depends only on the range coder + plain int
++// triples so it can be unit-tested standalone before wiring into the collector
++// and reader.
++
++#ifndef PMSF_COMPRESS_PCATM_STRICT_ADAPTIVE_RESIDUAL_H
++#define PMSF_COMPRESS_PCATM_STRICT_ADAPTIVE_RESIDUAL_H
++
++#include "rangecoder/qsmodel.h"
++#include "rangecoder/rangecod.h"
++
++#include <array>
++#include <cstddef>
++#include <cstdint>
++#include <stdexcept>
++#include <string>
++#include <vector>
++
++namespace pmsf {
++namespace pcatmstrict {
++
++namespace ard {
++
++constexpr int kLenTreeModelsPerAxis = 15;      // binary tree over a 4-bit length
++constexpr int kMantissaModelsPerAxis = 14;     // bits 13..0 below the top bit
++constexpr int kLenBits = 4;
++constexpr int kMaxMantissaBits = 14;           // z < 2^15 => at most 13 mantissa bits
++constexpr int kScaleBits = 12;
++constexpr int kRescale = 64;
++
++struct ArdConfig {
++    int scaleBits = kScaleBits;
++    int rescale = kRescale;
++};
++
++inline int32_t zigzag32(int32_t v) {
++    const uint32_t u = static_cast<uint32_t>(v) << 1;
++    return static_cast<int32_t>(u ^ static_cast<uint32_t>(v >> 31));
++}
++
++inline int32_t unzigzag32(int32_t z) {
++    const uint32_t u = static_cast<uint32_t>(z);
++    return static_cast<int32_t>((u >> 1) ^ (~(u & 1u) + 1u));
++}
++
++inline void appendVarU32(std::vector<uint8_t>& out, uint32_t v) {
++    while (v >= 0x80u) {
++        out.push_back(static_cast<uint8_t>((v & 0x7fu) | 0x80u));
++        v >>= 7;
++    }
++    out.push_back(static_cast<uint8_t>(v));
++}
++
++inline uint32_t readVarU32(const uint8_t* data,
++                           std::size_t size,
++                           std::size_t& off,
++                           const char* what) {
++    uint32_t v = 0;
++    int shift = 0;
++    while (true) {
++        if (off >= size)
++            throw std::runtime_error(std::string("[PCATM-ADAPT-RES] truncated ") + what);
++        const uint8_t b = data[off++];
++        v |= static_cast<uint32_t>(b & 0x7fu) << shift;
++        if ((b & 0x80u) == 0)
++            break;
++        shift += 7;
++        if (shift > 28)
++            throw std::runtime_error(std::string("[PCATM-ADAPT-RES] bad varint ") + what);
++    }
++    return v;
++}
++
++inline int lenModelIndex(int numRounds, int round, int axis, int node) {
++    (void)numRounds;
++    (void)round;
++    return axis * kLenTreeModelsPerAxis + node;
++}
++
++inline int mantissaModelIndexBase(int numRounds) {
++    (void)numRounds;
++    return 3 * kLenTreeModelsPerAxis;
++}
++
++inline int mantissaModelIndex(int numRounds, int round, int axis, int k) {
++    (void)numRounds;
++    (void)round;
++    return mantissaModelIndexBase(numRounds) + axis * kMantissaModelsPerAxis + k;
++}
++
++inline void initModels(std::vector<qsmodel>& models, int numRounds, int compress,
++                       const ArdConfig& cfg = ArdConfig{}) {
++    (void)numRounds;
++    models.resize(static_cast<std::size_t>(3) *
++                  (kLenTreeModelsPerAxis + kMantissaModelsPerAxis));
++    for (auto& m : models) {
++        initqsmodel(&m, 2, cfg.scaleBits, cfg.rescale, nullptr, compress);
++    }
++}
++
++inline void freeModels(std::vector<qsmodel>& models) {
++    for (auto& m : models)
++        deleteqsmodel(&m);
++    models.clear();
++}
++
++inline void encodeBit(qsmodel& model, rangecoder& rc, int bit, const ArdConfig& cfg) {
++    int syfreq = 0;
++    int ltfreq = 0;
++    qsgetfreq(&model, bit, &syfreq, &ltfreq);
++    encode_shift(&rc, static_cast<freq>(syfreq), static_cast<freq>(ltfreq),
++                 static_cast<freq>(cfg.scaleBits));
++    qsupdate(&model, bit);
++}
++
++inline int decodeBit(qsmodel& model, rangecoder& rc, const ArdConfig& cfg) {
++    const int cf = decode_culshift(&rc, cfg.scaleBits);
++    const int sym = qsgetsym(&model, cf);
++    int syfreq = 0;
++    int ltfreq = 0;
++    qsgetfreq(&model, sym, &syfreq, &ltfreq);
++    decode_update(&rc, static_cast<freq>(syfreq), static_cast<freq>(ltfreq),
++                  static_cast<freq>(1 << cfg.scaleBits));
++    qsupdate(&model, sym);
++    return sym;
++}
++
++inline uint32_t encodeValue(qsmodel* models,
++                            int numRounds,
++                            rangecoder& rc,
++                            int round,
++                            int axis,
++                            int32_t value,
++                            const ArdConfig& cfg = ArdConfig{}) {
++    uint32_t z = static_cast<uint32_t>(zigzag32(value));
++    int L = 0;
++    while ((z >> L) != 0)
++        ++L;
++    if (L > 15)
++        throw std::runtime_error("[PCATM-ADAPT-RES] residual magnitude out of range");
++    int node = 0;
++    for (int level = 0; level < kLenBits; ++level) {
++        const int bit = (L >> (kLenBits - 1 - level)) & 1;
++        encodeBit(models[lenModelIndex(numRounds, round, axis, node)], rc, bit, cfg);
++        node = node * 2 + 1 + bit;
++    }
++    for (int k = L - 2; k >= 0; --k) {
++        const int bit = static_cast<int>((z >> k) & 1u);
++        encodeBit(models[mantissaModelIndex(numRounds, round, axis, k)], rc, bit, cfg);
++    }
++    return z;
++}
++
++inline int32_t decodeValue(qsmodel* models,
++                           int numRounds,
++                           rangecoder& rc,
++                           int round,
++                           int axis,
++                           const ArdConfig& cfg = ArdConfig{}) {
++    int node = 0;
++    int L = 0;
++    for (int level = 0; level < kLenBits; ++level) {
++        const int bit = decodeBit(models[lenModelIndex(numRounds, round, axis, node)], rc, cfg);
++        L = (L << 1) | bit;
++        node = node * 2 + 1 + bit;
++    }
++    if (L == 0)
++        return 0;
++    if (L == 1)
++        return unzigzag32(1);
++    uint32_t z = 1u << (L - 1);
++    for (int k = L - 2; k >= 0; --k) {
++        const int bit = decodeBit(models[mantissaModelIndex(numRounds, round, axis, k)], rc, cfg);
++        z |= static_cast<uint32_t>(bit) << k;
++    }
++    return unzigzag32(static_cast<int32_t>(z));
++}
++
++inline std::vector<uint8_t> encode(
++    const std::vector<std::vector<std::array<int32_t, 3>>>& rounds,
++    const ArdConfig& cfg = ArdConfig{}) {
++    const int numRounds = static_cast<int>(rounds.size());
++    std::size_t totalValues = 0;
++    for (const auto& r : rounds)
++        totalValues += r.size() * 3;
++    std::vector<char> buf(totalValues * 2 + 65536);
++    std::size_t rcOffset = 0;
++    rangecoder rc;
++    rc.p_data = buf.data();
++    rc.p_dataOffset = &rcOffset;
++    start_encoding(&rc, 0, 0);
++    std::vector<qsmodel> models;
++    initModels(models, numRounds, 1, cfg);
++    for (int r = 0; r < numRounds; ++r) {
++        const auto& res = rounds[static_cast<std::size_t>(r)];
++        for (const auto& p : res) {
++            for (int a = 0; a < 3; ++a)
++                encodeValue(models.data(), numRounds, rc, r, a, p[static_cast<std::size_t>(a)], cfg);
++        }
++    }
++    const std::size_t payloadBytes = done_encoding(&rc);
++    freeModels(models);
++
++    std::vector<uint8_t> out;
++    appendVarU32(out, static_cast<uint32_t>(numRounds));
++    for (const auto& r : rounds)
++        appendVarU32(out, static_cast<uint32_t>(r.size()));
++    appendVarU32(out, static_cast<uint32_t>(payloadBytes));
++    out.insert(out.end(), reinterpret_cast<uint8_t*>(buf.data()),
++               reinterpret_cast<uint8_t*>(buf.data()) + payloadBytes);
++    return out;
++}
++
++inline std::vector<std::vector<std::array<int32_t, 3>>> decode(
++    const uint8_t* data,
++    std::size_t size,
++    int expectedRounds,
++    const ArdConfig& cfg = ArdConfig{}) {
++    std::size_t off = 0;
++    const int numRounds = static_cast<int>(readVarU32(data, size, off, "numRounds"));
++    if (numRounds != expectedRounds)
++        throw std::runtime_error("[PCATM-ADAPT-RES] round count mismatch");
++    std::vector<std::vector<std::array<int32_t, 3>>> rounds(
++        static_cast<std::size_t>(numRounds));
++    for (int r = 0; r < numRounds; ++r) {
++        const uint32_t count = readVarU32(data, size, off, "roundCount");
++        if (count > (1u << 20))
++            throw std::runtime_error("[PCATM-ADAPT-RES] residual count out of range");
++        rounds[static_cast<std::size_t>(r)].resize(count);
++    }
++    const uint32_t payloadBytes = readVarU32(data, size, off, "payloadBytes");
++    if (off + payloadBytes > size)
++        throw std::runtime_error("[PCATM-ADAPT-RES] truncated payload");
++
++    std::vector<char> staging(data + off, data + off + payloadBytes);
++    std::size_t rcOffset = 0;
++    rangecoder rc;
++    rc.p_data = staging.data();
++    rc.p_dataOffset = &rcOffset;
++    if (start_decoding(&rc) != 0)
++        throw std::runtime_error("[PCATM-ADAPT-RES] range start failed");
++    std::vector<qsmodel> models;
++    initModels(models, numRounds, 0, cfg);
++    for (int r = 0; r < numRounds; ++r) {
++        auto& res = rounds[static_cast<std::size_t>(r)];
++        for (auto& p : res) {
++            for (int a = 0; a < 3; ++a)
++                p[static_cast<std::size_t>(a)] =
++                    decodeValue(models.data(), numRounds, rc, r, a, cfg);
++        }
++    }
++    done_decoding(&rc);
++    freeModels(models);
++    return rounds;
++}
++
++}  // namespace ard
++}  // namespace pcatmstrict
++}  // namespace pmsf
++
++#endif  // PMSF_COMPRESS_PCATM_STRICT_ADAPTIVE_RESIDUAL_H
